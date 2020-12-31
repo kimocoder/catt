@@ -1,6 +1,51 @@
 # Changelog
 
 
+## Unreleased
+
+### Fixes
+
+* Don't do discovery dance when checking ip validity (#309) [theychx]
+
+
+## v0.12.0 (2020-10-28)
+
+### Features
+
+* Add seek-to opt to cast cmd (#307) [theychx]
+
+* Add remote-only subtitles to the API (#258) [Stavros Korokithakis]
+
+### Fixes
+
+* Wait longer for the Chromecast to connect to the HTTP server (#295) [Edd Barrett]
+
+
+## v0.11.3 (2020-07-18)
+
+### Fixes
+
+* Fix spurious "Invalid byte range" error. [Stavros Korokithakis]
+
+
+## v0.11.2 (2020-07-01)
+
+### Fixes
+
+* Revert to PyChromecast 6 until we can figure out what to do about 7. [Stavros Korokithakis]
+
+
+## v0.11.1 (2020-06-29)
+
+### Fixes
+
+* Force pychromecast 7, update to new api. [Ian Calvert]
+
+* Recognize the .jpeg suffix as a jpeg file (#262) [Stavros Korokithakis]
+
+* Create parent directories if config dir doesn't exist (fixes #251) (#252) [Stavros Korokithakis]
+
+
 ## v0.11.0 (2020-03-01)
 
 ### Features

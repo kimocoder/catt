@@ -1,12 +1,21 @@
-from .controllers import get_app, get_chromecast, get_chromecast_with_ip, get_chromecasts, get_controller
-from .error import APIError, CastError
+from typing import Optional
+
+from .controllers import CastController
+from .controllers import get_app
+from .controllers import get_controller
+from .discovery import CastDevice
+from .discovery import get_cast_device_with_ip
+from .discovery import get_cast_device_with_name
+from .discovery import get_cast_devices
+from .error import APIError
+from .error import CastError
 from .stream_info import StreamInfo
 
 
 def discover() -> list:
     """Perform discovery of devices present on local network, and return result."""
 
-    return [CattDevice(ip_addr=d.host) for d in get_chromecasts()]
+    return [CattDevice(ip_addr=d.ip) for d in get_cast_devices()]
 
 
 class CattDevice:
@@ -29,8 +38,9 @@ class CattDevice:
         self.ip_addr = ip_addr
         self.uuid = None
 
-        self._cast = None
-        self._cast_controller = None
+        self._cast_device = None  # type: Optional[CastDevice]
+        # Type comment for compatibility with Py3.5-.
+        self._cast_controller = None  # type: Optional[CastController]
         if not lazy:
             self._create_cast()
 
@@ -38,42 +48,47 @@ class CattDevice:
         return "<CattDevice: {}>".format(self.name or self.ip_addr)
 
     def _create_cast(self) -> None:
-        self._cast = get_chromecast_with_ip(self.ip_addr) if self.ip_addr else get_chromecast(self.name)
-        if not self._cast:
+        self._cast_device = (
+            get_cast_device_with_ip(self.ip_addr) if self.ip_addr else get_cast_device_with_name(self.name)
+        )
+        if not self._cast_device:
             raise CastError("Device could not be found")
-        self._cast.wait()
-
+        self._cast = self._cast_device.cast
         self.name = self._cast.name
-        self.ip_addr = self._cast.host
+        self.ip_addr = self._cast_device.ip
         self.uuid = self._cast.uuid
+
+        self._cast.wait()
 
     def _create_controller(self) -> None:
         self._cast_controller = get_controller(self._cast, get_app("default"))
 
     @property
     def controller(self):
-        if not self._cast:
+        if not self._cast_device:
             self._create_cast()
         if not self._cast_controller:
             self._create_controller()
         return self._cast_controller
 
-    def play_url(self, url: str, resolve: bool = False, block: bool = False) -> None:
+    def play_url(self, url: str, resolve: bool = False, block: bool = False, subtitle_url: str = None) -> None:
         """
         Initiate playback of content.
 
-        :param url: Network location of content.
-        :param resolve: Try to resolve location of content stream with Youtube-dl.
-                        If this is not set, it is assumed that the url points directly to the stream.
-        :param block: Block until playback has stopped,
-                      either by end of content being reached, or by interruption.
+        :param url:          Network location of content.
+        :param resolve:      Try to resolve location of content stream with Youtube-dl.
+                             If this is not set, it is assumed that the url points directly to the stream.
+        :param block:        Block until playback has stopped,
+                             either by end of content being reached, or by interruption.
+        :param subtitle_url: A URL to a subtitle file to use when playing. Make sure CORS headers are correct on the
+                             server when using this, and that the subtitles are in a suitable format.
         """
 
         if resolve:
             stream = StreamInfo(url)
             url = stream.video_url
         self.controller.prep_app()
-        self.controller.play_media_url(url)
+        self.controller.play_media_url(url, subtitles=subtitle_url)
 
         if self.controller.wait_for(["PLAYING"], timeout=10):
             if block:

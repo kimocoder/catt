@@ -3,8 +3,11 @@ from pathlib import Path
 
 import youtube_dl
 
-from .error import ExtractionError, FormatError, PlaylistError
-from .util import get_local_ip, guess_mime
+from .error import ExtractionError
+from .error import FormatError
+from .error import PlaylistError
+from .util import get_local_ip
+from .util import guess_mime
 
 AUDIO_DEVICE_TYPES = ["audio", "group"]
 # The manufacturer field is currently unavailable for Google products.
@@ -29,8 +32,9 @@ DEFAULT_YTDL_OPTS = {"quiet": True, "no_warnings": True}
 
 
 class StreamInfo:
-    def __init__(self, video_url, device_info=None, ytdl_options=None):
-        self.local_ip = get_local_ip(device_info.ip) if device_info else None
+    def __init__(self, video_url, device_info=None, ytdl_options=None, throw_ytdl_dl_errs=False):
+        self._throw_ytdl_dl_errs = throw_ytdl_dl_errs
+        self.local_ip = get_local_ip(device_info["ip"]) if device_info else None
         self.port = random.randrange(45000, 47000) if device_info else None
 
         if "://" in video_url:
@@ -41,8 +45,8 @@ class StreamInfo:
                 self._preinfo = self._get_stream_preinfo(self._preinfo["url"])
             self.is_local_file = False
 
-            model = (device_info.manufacturer, device_info.model_name) if device_info else None
-            cast_type = device_info.cast_type if device_info else None
+            model = (device_info["manufacturer"], device_info["model_name"]) if device_info else None
+            cast_type = device_info["cast_type"] if device_info else None
             if "format" in self._ydl.params:
                 # We pop the "format" item, as it will make get_stream_info fail,
                 # if it holds an invalid value.
@@ -164,7 +168,17 @@ class StreamInfo:
         try:
             return self._ydl.extract_info(video_url, process=False)
         except youtube_dl.utils.DownloadError:
-            raise ExtractionError("Remote resource not found")
+            # We sometimes get CI failures when testing with YouTube videos,
+            # as YouTube throttles our connections intermittently. We evaluated
+            # various solutions and the one we agreed on was ignoring the specific
+            # "Too many requests" exceptions when testing.
+            # To do that, we needed a way to raise exceptions instead of swallowing
+            # them, so we could ignore the ones we didn't need in the tests. This
+            # property is the way to do that.
+            if self._throw_ytdl_dl_errs:
+                raise
+            else:
+                raise ExtractionError("Remote resource not found")
 
     def _get_stream_info(self, preinfo):
         try:

@@ -1,10 +1,9 @@
-import hashlib
 import json
-import tempfile
 import threading
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional  # noqa
+from typing import Any
+from typing import Optional
 
 import pychromecast
 from pychromecast.config import APP_BACKDROP as BACKDROP_APP_ID
@@ -14,13 +13,16 @@ from pychromecast.config import APP_YOUTUBE as YOUTUBE_APP_ID
 from pychromecast.controllers.dashcast import DashCastController as PyChromecastDashCastController
 from pychromecast.controllers.youtube import YouTubeController
 
-from . import __version__
-from .error import AppSelectionError, CastError, ControllerError, ListenerError, StateFileError
+from .discovery import get_cast_device
+from .error import AppSelectionError
+from .error import CastError
+from .error import ControllerError
+from .error import ListenerError
+from .error import StateFileError
 from .stream_info import StreamInfo
-from .util import echo_warning, is_ipaddress
+from .util import echo_warning
 
 GOOGLE_MEDIA_NAMESPACE = "urn:x-cast:com.google.cast.media"
-DEFAULT_PORT = 8009
 VALID_STATE_EVENTS = ["UNKNOWN", "IDLE", "BUFFERING", "PLAYING", "PAUSED"]
 CLOUD_APP_ID = "38579375"
 
@@ -40,73 +42,7 @@ APPS = [
 ]
 
 
-def get_chromecasts():
-    devices = pychromecast.get_chromecasts()
-    devices.sort(key=lambda cc: cc.name)
-    return devices
-
-
-def get_chromecast(device_name):
-    devices = get_chromecasts()
-    if not devices:
-        return None
-
-    if device_name:
-        try:
-            return next(cc for cc in devices if cc.name == device_name)
-        except StopIteration:
-            return None
-    else:
-        return devices[0]
-
-
-def get_chromecast_with_ip(device_ip, port=DEFAULT_PORT):
-    try:
-        # tries = 1 is necessary in order to stop pychromecast engaging
-        # in a retry behaviour when ip is correct, but port is wrong.
-        return pychromecast.Chromecast(device_ip, port=port, tries=1)
-    except pychromecast.error.ChromecastConnectionError:
-        return None
-
-
-def get_cast(device=None):
-    """
-    Attempt to connect with requested device (or any device if none has been specified).
-
-    :param device: Can be an ip-address or a name.
-    :type device: str
-    :returns: Chromecast object for use in a CastController,
-              and CCInfo object for use in setup_cast and StreamInfo
-    :rtype: (pychromecast.Chromecast, CCInfo)
-    """
-
-    cast = None
-
-    if device and is_ipaddress(device):
-        cast = get_chromecast_with_ip(device, DEFAULT_PORT)
-        if not cast:
-            msg = "No device found at {}".format(device)
-            raise CastError(msg)
-        cc_info = CCInfo(cast.host, cast.port, None, None, cast.cast_type)
-    else:
-        cache = Cache()
-        cc_info = cache.get_data(device)
-
-        if cc_info:
-            cast = get_chromecast_with_ip(cc_info.ip, cc_info.port)
-        if not cast:
-            cast = get_chromecast(device)
-            if not cast:
-                msg = 'Specified device "{}" not found'.format(device) if device else "No devices found"
-                raise CastError(msg)
-            cc_info = CCInfo(cast.host, cast.port, cast.device.manufacturer, cast.model_name, cast.cast_type)
-            cache.set_data(cast.name, cc_info)
-
-    cast.wait()
-    return (cast, cc_info)
-
-
-def get_app(id_or_name, cast_type=None, strict=False, show_warning=False):
+def get_app(id_or_name: str, cast_type: Optional[str] = None, strict: bool = False, show_warning: bool = False) -> App:
     try:
         app = next(a for a in APPS if id_or_name in [a.id, a.name])
     except StopIteration:
@@ -131,36 +67,34 @@ def get_app(id_or_name, cast_type=None, strict=False, show_warning=False):
         return app
 
 
-# I'm not sure it serves any purpose to have get_app and get_controller
-# as two separate functions. I'll probably merge them at some point.
-def get_controller(cast, app, action=None, prep=None):
+def get_controller(cast, app, action=None, prep=None) -> "CastController":
     controller = {"youtube": YoutubeCastController, "dashcast": DashCastController}.get(app.name, DefaultCastController)
     if action and action not in dir(controller):
         raise ControllerError("This action is not supported by the {} controller".format(app.name))
     return controller(cast, app, prep=prep)
 
 
-def setup_cast(device_name, video_url=None, controller=None, ytdl_options=None, action=None, prep=None):
-    cast, cc_info = get_cast(device_name)
-    cast_type = cc_info.cast_type
-    stream = StreamInfo(video_url, device_info=cc_info, ytdl_options=ytdl_options) if video_url else None
+def setup_cast(device_desc, video_url=None, controller=None, ytdl_options=None, action=None, prep=None):
+    cast_device = get_cast_device(device_desc)
+    cast = cast_device.cast
+    cast_type = cast.cast_type
+    app_id = cast.app_id
+    stream = StreamInfo(video_url, device_info=cast_device.info, ytdl_options=ytdl_options) if video_url else None
 
     if controller:
         app = get_app(controller, cast_type, strict=True)
-    elif prep == "app":
-        if stream:
-            if stream.is_local_file:
-                app = get_app("default")
-            else:
-                app = get_app(stream.extractor, cast_type, show_warning=True)
+
+    elif prep == "app" and stream and not stream.is_local_file:
+        app = get_app(stream.extractor, cast_type, show_warning=True)
+
+    elif prep in ["control", "info"]:
+        if app_id and app_id != BACKDROP_APP_ID:
+            app = get_app(app_id, cast_type)
         else:
-            app = get_app("default")
+            raise CastError("Chromecast is inactive")
+
     else:
-        # cast.app_id can be None, in the case of an inactive audio device.
-        if cast.app_id:
-            app = get_app(cast.app_id, cast_type)
-        else:
-            app = get_app("default")
+        app = get_app("default")
 
     cast_controller = get_controller(cast, app, action=action, prep=prep)
     return (cast_controller, stream) if stream else cast_controller
@@ -198,54 +132,6 @@ class CattStore:
             pass
 
 
-class CCInfo:
-    def __init__(self, ip, port, manufacturer, model_name, cast_type):
-        self.ip = ip
-        self.port = port
-        self.manufacturer = manufacturer
-        self.model_name = model_name
-        self.cast_type = cast_type
-
-    @property
-    def all_info(self):
-        return self.__dict__
-
-
-class Cache(CattStore):
-    def __init__(self):
-        vhash = hashlib.sha1(__version__.encode()).hexdigest()[:8]
-        cache_path = Path(tempfile.gettempdir(), "catt_{}_cache".format(vhash), "chromecast_hosts")
-        super(Cache, self).__init__(cache_path)
-        self._create_store_dir()
-
-        if not self.store_path.is_file():
-            devices = get_chromecasts()
-            cache_data = {
-                d.name: CCInfo(d.host, d.port, d.device.manufacturer, d.model_name, d.cast_type).all_info
-                for d in devices
-            }
-            self._write_store(cache_data)
-
-    def get_data(self, name: str):  # type: ignore
-        data = self._read_store()
-        # In the case that cache has been initialized with no cc's on the
-        # network, we need to ensure auto-discovery.
-        if not data:
-            return None
-        if name:
-            fetched = data.get(name)
-        else:
-            # When the user does not specify a device, we need to make an attempt
-            # to consistently return the same IP, thus the alphabetical sorting.
-            fetched = data[min(data, key=str)]
-        return CCInfo(**fetched) if fetched else None
-
-    def set_data(self, name: str, device_entry: CCInfo) -> None:  # type: ignore
-        data = self._read_store()
-        data[name] = device_entry.all_info
-        self._write_store(data)
-
-
 class StateMode(Enum):
     READ = 1
     CONF = 2
@@ -262,7 +148,7 @@ class CastState(CattStore):
         elif mode == StateMode.ARBI:
             self._write_store({})
 
-    def get_data(self, name: str):  # type: ignore
+    def get_data(self, name: str) -> str:  # type: ignore
         try:
             data = self._read_store()
             if set(next(iter(data.values())).keys()) != set(["controller", "data"]):
@@ -312,7 +198,7 @@ class CastStatusListener:
 
 
 class MediaStatusListener:
-    def __init__(self, current_state, states, invert=False, fail=False):
+    def __init__(self, current_state, states, invert=False):
         if any(s not in VALID_STATE_EVENTS for s in states):
             raise ListenerError("Invalid state(s)")
         if invert:
@@ -323,10 +209,7 @@ class MediaStatusListener:
         self._state_event = threading.Event()
         self._current_state = current_state
         if self._current_state in self._states_waited_for:
-            if fail:
-                raise ListenerError("Condition is already met (fail is set)")
-            else:
-                self._state_event.set()
+            self._state_event.set()
 
     def new_media_status(self, status):
         self._current_state = status.player_state
@@ -381,22 +264,14 @@ class CastController:
             self._cast_listener.app_ready.wait()
 
     def prep_control(self):
-        """Make sure chromecast is not inactive or idle."""
+        """Make sure chromecast is not idle."""
 
-        self._check_inactive()
         self._update_status()
         if self._is_idle:
             raise CastError("Nothing is currently playing")
 
     def prep_info(self):
-        """Make sure chromecast is not inactive."""
-
-        self._check_inactive()
         self._update_status()
-
-    def _check_inactive(self):
-        if self._cast.app_id == BACKDROP_APP_ID or not self._cast.app_id:
-            raise CastError("Chromecast is inactive")
 
     def _update_status(self):
         # Under rare circumstances, a lot of fields are not populated in the updated status.
@@ -568,16 +443,14 @@ class PlaybackBaseMixin:
     def play_media_url(self, video_url: str, **kwargs) -> None:
         raise NotImplementedError
 
-    def play_media_id(self, video_id: str) -> None:
+    def play_media_id(self, video_id: str, **kwargs) -> None:
         raise NotImplementedError
 
     def play_playlist(self, playlist_id: str, video_id: str) -> None:
         raise NotImplementedError
 
-    def wait_for(self, states: list, invert: bool = False, fail: bool = False, timeout: Optional[int] = None) -> bool:
-        media_listener = MediaStatusListener(
-            self._cast.media_controller.status.player_state, states, invert=invert, fail=fail
-        )
+    def wait_for(self, states: list, invert: bool = False, timeout: Optional[int] = None) -> bool:
+        media_listener = MediaStatusListener(self._cast.media_controller.status.player_state, states, invert=invert)
         self._cast.media_controller.register_status_listener(media_listener)
 
         try:
@@ -638,8 +511,12 @@ class YoutubeCastController(CastController, MediaControllerMixin, PlaybackBaseMi
         self.save_capability = "partial"
         self.playlist_capability = "complete"
 
-    def play_media_id(self, video_id):
+    def play_media_id(self, video_id, **kwargs):
         self._controller.play_video(video_id)
+        current_time = kwargs.get("current_time")
+        if current_time:
+            self.wait_for(["PLAYING"])
+            self.seek(current_time)
 
     def play_playlist(self, playlist_id, video_id):
         self.clear()
@@ -662,6 +539,4 @@ class YoutubeCastController(CastController, MediaControllerMixin, PlaybackBaseMi
         self._controller.clear_playlist()
 
     def restore(self, data):
-        self.play_media_id(data["content_id"])
-        self.wait_for(["PLAYING"])
-        self.seek(data["current_time"])
+        self.play_media_id(data["content_id"], current_time=data["current_time"])
